@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Procesos en Elixir</title>
+    <meta charset="utf-8">
+    <style>
+      @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+      @import url(https://fonts.googleapis.com/css?family=Droid+Serif:400,700,400italic);
+      @import url(https://fonts.googleapis.com/css?family=Fira+Mono:400,500,700&display=swap);
+
+      body {
+        font-family: 'Droid Serif';
+      }
+
+      p {
+        font-size: 24px;
+      }
+
+      li {
+        margin-bottom: 8px;
+      }
+
+      h1, h2, h3 {
+        font-family: 'Yanone Kaffeesatz';
+        font-weight: normal;
+        margin-top: 45px;
+        margin-bottom: 10px;
+      }
+
+      .gray {
+        color: gray;
+      }
+
+      .remark-code, .remark-inline-code {
+        font-family: 'Fira Mono', monospace;
+        font-size: 16px;
+        line-height: 1.5em;
+        text-shadow: none;
+        border-radius: 5px;
+      }
+
+      .remark-inline-code {
+        font-family: 'Fira Mono', monospace;
+        font-size: 20px;
+        line-height: 1.5em;
+        text-shadow: none;
+        border-radius: 5px;
+      }
+
+      .remark-code-line-highlighted {
+        background-color: rgba(0, 255, 240, 0.4);
+      }
+
+      .remark-notes, p {
+        font-size: 20px;
+      }
+
+      .remark-notes-preview p {
+        font-size: 18px;
+      }
+
+    </style>
+  </head>
+  <body>
+    <textarea id="source">
+
+class: center, middle
+
+# Procesos en Elixir 2
+
+---
+class: center, middle
+
+# Motivación
+
+???
+La idea de esta charla era redondear un poco lo que me había faltado de la
+charla anterior de procesos. En particular profundizar un poco en GenServers
+que lo pasé muy por arriba y me parece que no se entendió nada y además hablar
+de supervisores.
+
+Esta charla es casi que un resumen de la sección de Concurrencia del
+libro Programming Elixir (que está subido en Google Drive si lo quieren
+leer)
+
+---
+# Agenda
+
+- Repaso de la charla anterior
+- ¿Qué es OTP?
+- GenServers
+- Supervisors
+
+???
+Bueno, vamos a estar hablando de esto. Un poco de contexto de cómo funcionaban
+los procesos, dar una definición de OTP y comentar dos de sus componentes más
+importantes
+
+---
+## REPASO: ¿Cómo se crean procesos?
+
+```elixir
+pid = spawn(fn -> 1 + 2 end)
+# PID<0.106.0>
+
+Process.alive?(pid)
+# false
+```
+
+???
+Podemos usar spawn para crear un proceso. Recibe como argumento la función
+que se va a ejecutar. Esa función es ejecutada en el proceso que se creó y,
+cuando termina, el proceso muere.
+
+El process alive que vemos ahí va a dar true por el ratito que demore en
+ejecutarse la función que le pasamos por parámetro
+
+---
+## REPASO: Mailboxes
+```elixir
+defmodule Consumer do
+  def process_message() do
+    receive do
+      :hello -> IO.puts("Hello world!")
+      :bye -> IO.puts("Good bye")
+      _ -> IO.puts("No idea how to handle this")
+    after
+      10_000 -> IO.puts("Didn't get anything")
+    end
+  end
+end
+
+pid = spawn(Consumer, :process_message, [])
+send(pid, :bye)
+# Good bye
+```
+
+???
+Cada proceso tiene su propio mailbox al cual otros procesos pueden mandar
+mensajes usando la primitiva `send`
+Hay otra primitiva para leerlos que se llama `receive`.
+La gracia del receive es que, si el mailbox está vacío, se queda bloqueado
+hasta que alguien le envíe un mensaje.
+
+---
+class: center, middle
+# ¿Qué es OTP?
+
+???
+La idea es que como programador no tengamos que lidiar con estas primitivas y
+acá es donde entra en juego OTP.
+
+---
+# ¿Qué es OTP?
+
+- Es un framework
+
+???
+Es un framework que incluye una serie de componentes listos para usar y un
+conjunto de patrones de diseño para escribir nuestras aplicaciones
+
+--
+count: false
+
+- Define una jerarquía de aplicaciones
+
+???
+Una aplicación es un grupo de uno o más procesos. Pero estos procesos tienen
+que seguir alguna de las convenciones definidas por OTP para que sean
+compatibles con el framework
+
+--
+count: false
+
+- Convenciones
+
+???
+Hay convenciones para un montón de cosas: para manejo de eventos, para
+implementar el patron cliente/servidor y hasta para implementar máquinas de
+estados finitas.
+
+---
+# ¿En cuáles nos vamos a enfocar?
+
+- GenServers
+- Supervisors
+
+???
+Nos vamos a enfocar en estas dos que les comentaba al principio
+
+---
+class: center, middle
+
+# GenServers
+
+???
+Empecemos por este componente
+
+---
+# El manejo de estados sin OTP
+
+```elixir
+# counter.ex
+
+defmodule State do
+  def counter(number) do
+    receive do
+      :inc ->
+        counter(number + 1)
+
+      {:get, caller} ->
+        send(caller, number)
+        counter(number)
+    end
+  end
+end
+
+
+# pid = spawn(State, :counter, [0])
+```
+
+???
+Mediante los mensajes :inc y :get podemos incrementar el contador y pedirle
+que nos mande el valor guardado respectivamente
+
+---
+# ¿Y si ahora quiero implementar un stack?
+
+```elixir
+# stack.ex
+
+defmodule Stack do
+  def stack(list) do
+    receive do
+      {:push, value} ->
+        stack([value | list])
+
+      {:pop, caller} ->
+        [ head | tail ] = list
+        send(caller, head)
+        stack(tail)
+    end
+  end
+end
+
+# pid = spawn(Stack, :stack, [[]])
+```
+
+???
+Son bastante parecidos, no? Bueno, la gente que estaba haciendo OTP se dio
+cuenta de que este patrón se usa demasiado y decidieron implementarlo por
+nosotros.
+
+---
+class: center, middle
+
+# Intentemos generalizar esto
+
+???
+Y perdonen que siempre hago esto pero es mi forma de entender los conceptos y
+dentro de todo me parece bastante didáctico compartirlo
+
+---
+```elixir
+# server_1.ex
+
+defmodule Stack do
+  def loop(state) do
+    receive do
+      message -> handler(message, state)
+    end
+  end
+
+  def start(init) do
+    spawn(Stack, :loop, [init])
+  end
+
+  def handler({:push, value}, state) do
+    loop([value | state])
+  end
+
+  def handler({:pop, caller}, state) do
+    [ head | tail ] = state
+    send(caller, head)
+    loop(tail)
+  end
+end
+
+# pid = Stack.start([])
+```
+
+---
+```elixir
+# server_2.ex
+defmodule Stack do
+  def loop(state) do
+    receive do
+      {:cast, message} ->
+        new_state = handle_cast(message, state)
+        loop(new_state)
+      {:call, from, message} ->
+        {response, new_state} = handle_call(message, state)
+        send(from, response)
+        loop(new_state)
+    end
+  end
+
+  def start(init) do
+    spawn(Stack, :loop, [init])
+  end
+
+  def cast(pid, message) do
+    send(pid, {:cast, message})
+  end
+
+  def call(pid, message) do
+    send(pid, {:call, self(), message})
+  end
+
+  def handle_cast({:push, value}, state) do
+    [value | state]
+  end
+
+  def handle_call(:pop, state) do
+    [ head | tail ] = state
+    {head, tail}
+  end
+end
+
+# pid = Stack.start([])
+```
+
+---
+```elixir
+# server_3.ex
+defmodule Stack do
+  use GenServer
+
+  def init(list) do
+    {:ok, list}
+  end
+
+  def handle_cast({:push, value}, state) do
+    {:noreply, [value | state]}
+  end
+
+  def handle_call(:pop, _from, state) do
+    [ head | tail ] = state
+    {:reply, head, tail}
+  end
+end
+
+# {:ok, pid} = GenServer.start(Stack, [1])
+```
+
+---
+class: center, middle
+
+# Supervisors
+## ¿Qué es la filosofía del __let it crash__?
+
+???
+Los supervisors son el corazón de la reliability.
+Los errores en programas pasan todo el tiempo y son inevitables. No solo
+porque los programadores no somos perfectos sino porque muchas veces
+dependemos de servicios externos que no pueden ser confiables (un servicio se
+quedó offline, falló un disco duro, etc).
+
+Hay muchas formas de manejar estos errores. La mayoría de los lenguajes de
+programación (entre ellos Elixir) proveen alguna manera de manejarlos.
+
+Sin embargo, escribir código defensivo para protegernos puede ser complejo.
+
+OTP brinda mecanismos para detectar que un proceso falló y hacer algo para
+recuperarse.
+
+Cuando se habla de "let it crash" no nos referimos a dejar que explote todo y
+llenar al usuario con mensajes de error. Es todo lo contrario, es usar a
+nuestro favor que un proceso puede fallar y aún así nuestro sistema sigue
+funcionando.
+
+---
+class: center, middle
+
+# Los supervisores son procesos
+
+???
+Los supervisores no son otra cosa que procesos, pero con la tarea específica
+de manejar uno o más procesos. Podemos entonces dividir a los procesos en dos
+categorías. Los workers son aquellos que realizan lógica de negocio, mientras
+los supervisores son los que supervisan a los workers o, incluso, a otros
+supervisores.
+
+Un supervisor en OTP recibe una lista de procesos a monitorear y qué hacer si
+alguno de ellos muere.
+
+---
+```shell
+mix new --sup sequence
+```
+
+```elixir
+defmodule Sequence.Application do
+  use Application
+
+  def start(_type, _args) do
+    children = [
+      # Starts a worker by calling: Sequence.Worker.start_link(arg)
+      # {Sequence.Worker, arg}
+    ]
+
+    opts = [strategy: :one_for_one, name: Sequence.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+???
+Basicamente lo que hace es crear un módulo que se llama Application que tiene
+una función start. Esa función lo que hace es definir una lista de children a
+los que va a ir spawneando secuencialmente.
+
+Si vemos el ejemplo nos damos cuenta que nuestros workers tienen que
+implementar la función start_link, ya que va a ir recorriendo cada uno y
+llamando a esa función
+
+También le podemos pasar algunas opciones como la estrategia para reiniciar
+los workers. También le podemos dar un nombre para identificarlo dentro de
+nuestra aplicación.
+
+---
+# Estrategias de reinicio de los workers
+- `:one_for_one`
+- `:one_for_all`
+- `:rest_for_one`
+
+???
+one_for_one: Si uno de los workers muere, el supervisor lo reinicia
+one_for_all: si un worker muere, se matan todos los workers hermanos y se reinician
+rest_for_one: si un worker muere, se reinicia él y todos los hermanos que se crearon después
+
+---
+# Veamos un ejemplo
+
+???
+Mostrar lo que hace Sequence. Probarlo sin supervisar. Probarlo con
+supervición y ver qué pasa cuando falla
+
+iex -S mix
+Sequence.start_link(123)
+Secuence.next_number()
+Secuence.increment_number(3)
+
+---
+class: center, middle
+
+# ¿Cómo hacemos para no perder los datos?
+
+???
+Bueno, la idea va a ser agregar otro hijo al supervisor que mantenga el
+último estado bueno conocido.
+
+---
+# Imagen del diagrama
+![Supervisor](images/supervisor.png)
+
+???
+Acá es un buen momento para discutir la estrategia de reinicio de los workers
+Primero que nada, Sequence va a depender de Stash así que debe iniciarse
+después
+Segundo, queremos que cuando falle sequence no se renicie el stash. Pero vamos
+a querer que si emplota el stash se reinicie también el sequence
+
+Entonces cambiamos la estrategia a rest_for_one
+
+Probar el mismo ejemplo
+
+---
+class: center, middle
+# ¿Algo más complejo?
+
+![Multiple supervisors](images/multiple_supervisors.png)
+
+---
+class: center, middle
+# ¡Muchas gracias!
+### ¿Preguntas? ¿Comentarios?
+
+
+</textarea>
+    <script src="https://remarkjs.com/downloads/remark-latest.min.js">
+    </script>
+    <script>
+      var slideshow = remark.create({
+	ratio: '4:3',
+	highlightStyle: 'gruvbox-dark',
+	highlightLines: true,
+      });
+    </script>
+  </body>
+</html>
